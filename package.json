@@ -1,6 +1,6 @@
 {
     "name": "obsidian-plane-pages-sync",
-    "version": "1.1.0",
+    "version": "1.1.1",
     "description": "Obsidian plugin that pushes project-folder notes to Plane project Pages",
     "keywords": [],
     "repository": {
