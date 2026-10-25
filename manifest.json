@@ -1,7 +1,7 @@
 {
     "id": "plane-pages-sync",
     "name": "Plane Pages Sync",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "minAppVersion": "1.13.2",
     "description": "Write notes in project folders and publish them as Plane project pages.",
     "author": "Abdullah Waqar",
