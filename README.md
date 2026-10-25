@@ -88,19 +88,3 @@ npm run format        # dprint: 4 spaces, braces on the next line
 ```
 
 To try changes in a vault, link the project folder into `<vault>/.obsidian/plugins/plane-pages-sync` and install the Hot Reload plugin.
-
-### Publishing to the community directory
-
-Only the first version needs submitting. Later releases are picked up from GitHub automatically.
-
-1. Make the repository public with this README, `LICENSE` and `manifest.json` committed on the default branch.
-2. Publish a release with the steps above.
-3. Sign in at [community.obsidian.md](https://community.obsidian.md) with your Obsidian account and connect GitHub.
-4. Add the plugin from the dashboard and set pricing to **Free**.
-5. Fix anything the automated review flags, then release a new patch version.
-
-Run `npm run check` before every release. It covers the same lint rules as the review.
-
-## License
-
-[MIT](LICENSE)
