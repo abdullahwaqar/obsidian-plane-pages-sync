@@ -1,8 +1,8 @@
-# Plane Pages Sync
+# Plane Sync
 
 Write notes in Obsidian, publish them as [Plane](https://plane.so) project pages. One folder is one Plane project, and every note in it becomes a page.
 
-![Plane Pages Sync: write in Obsidian, publish to Plane](assets/how-it-works.png)
+![Plane Sync: write in Obsidian, publish to Plane](assets/how-it-works.png)
 
 ```
 Plane/
@@ -31,13 +31,13 @@ Requires Obsidian 1.13.2 or later. Works on desktop and mobile.
 
 ### Manually
 
-1. Download `main.js` and `manifest.json` from the [latest release](https://github.com/abdullahwaqar/obsidian-plane-pages-sync/releases/latest).
-2. Put them in `<your vault>/.obsidian/plugins/plane-pages-sync/`.
-3. Reload Obsidian and enable **Plane Pages Sync** under Settings > Community plugins.
+1. Download `main.js` and `manifest.json` from the [latest release](https://github.com/abdullahwaqar/obsidian-plane-sync/releases/latest).
+2. Put them in `<your vault>/.obsidian/plugins/plane-sync/`.
+3. Reload Obsidian and enable **Plane Sync** under Settings > Community plugins.
 
 ## Set up
 
-Open Settings > Plane Pages Sync:
+Open Settings > Plane Sync:
 
 1. **Personal access token**: create one in Plane under Profile settings > Personal access tokens, then add it here. It's stored in Obsidian's secret storage, not in the plugin's data file.
 2. **Workspace**: your workspace slug. Pasting any Plane link from that workspace also works.
@@ -101,4 +101,4 @@ npm run build         # production build
 npm run format        # dprint: 4 spaces, braces on the next line
 ```
 
-To try changes in a vault, link the project folder into `<vault>/.obsidian/plugins/plane-pages-sync` and install the Hot Reload plugin.
+To try changes in a vault, link the project folder into `<vault>/.obsidian/plugins/plane-sync` and install the Hot Reload plugin.

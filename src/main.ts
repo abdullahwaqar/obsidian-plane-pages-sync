@@ -496,7 +496,7 @@ export default class PlanePagesSync extends Plugin
             {
                 new Notice(`Plane sync failed: ${this.lastError}`, 8000);
             }
-            console.error("[plane-pages-sync]", e);
+            console.error("[plane-sync]", e);
             return "failed";
         }
         finally
@@ -716,7 +716,7 @@ export default class PlanePagesSync extends Plugin
             }
             catch (e)
             {
-                console.error("[plane-pages-sync] archive failed", e);
+                console.error("[plane-sync] archive failed", e);
             }
         }
     }

@@ -41,7 +41,7 @@ export interface Settings
 }
 
 export const PLANE_CLOUD_API = "https://api.plane.so";
-const LEGACY_TOKEN_SECRET = "plane-pages-sync-token";
+const LEGACY_TOKEN_SECRET = "plane-sync-token";
 const CONNECTION_KEYS = new Set<string>(["tokenSecret", "workspace", "selfHosted", "instanceUrl"]);
 
 export const DEFAULTS: Settings = {

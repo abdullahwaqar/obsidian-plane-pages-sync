@@ -359,7 +359,7 @@ export class StickySync extends Events
             catch (e)
             {
                 this.lastError = errorMessage(e);
-                console.error("[plane-pages-sync] sticky push failed", e);
+                console.error("[plane-sync] sticky push failed", e);
             }
             finally
             {
@@ -484,7 +484,7 @@ export class StickySync extends Events
             {
                 new Notice(`Couldn't sync stickies: ${this.lastError}`, 8000);
             }
-            console.error("[plane-pages-sync] sticky pull failed", e);
+            console.error("[plane-sync] sticky pull failed", e);
         }
         finally
         {

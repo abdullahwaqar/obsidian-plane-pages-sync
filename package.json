@@ -1,11 +1,11 @@
 {
-    "name": "obsidian-plane-pages-sync",
+    "name": "obsidian-plane-sync",
     "version": "1.1.1",
-    "description": "Obsidian plugin that pushes project-folder notes to Plane project Pages",
+    "description": "Obsidian plugin that publish project folders as Plane pages and keep your Plane stickies in sync.",
     "keywords": [],
     "repository": {
         "type": "git",
-        "url": "https://github.com/abdullahwaqar/obsidian-plane-pages-sync.git"
+        "url": "https://github.com/abdullahwaqar/obsidian-plane-sync.git"
     },
     "license": "MIT",
     "author": "Abdullah Waqar",
