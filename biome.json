@@ -1,0 +1,23 @@
+{
+    "$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
+    "vcs": { "enabled": true, "clientKind": "git", "useIgnoreFile": true },
+    "files": { "includes": ["src/**", "test/**", "*.mjs"] },
+    "formatter": { "enabled": false },
+    "assist": { "actions": { "source": { "organizeImports": "on" } } },
+    "linter": {
+        "enabled": true,
+        "rules": {
+            "recommended": true,
+            "style": {
+                "useBlockStatements": "error",
+                "useConst": "error",
+                "useTemplate": "warn"
+            },
+            "suspicious": {
+                "noExplicitAny": "error",
+                "noConsole": { "level": "warn", "options": { "allow": ["error", "warn"] } }
+            },
+            "correctness": { "noUnusedImports": "error", "noUnusedVariables": "error" }
+        }
+    }
+}

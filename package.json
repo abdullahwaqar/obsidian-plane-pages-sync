@@ -1,0 +1,42 @@
+{
+    "name": "obsidian-plane-pages-sync",
+    "version": "0.1.0",
+    "description": "Obsidian plugin that pushes project-folder notes to Plane project Pages",
+    "keywords": [],
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/abdullahwaqar/obsidian-plane-pages-sync.git"
+    },
+    "license": "MIT",
+    "author": "Abdullah Waqar",
+    "type": "module",
+    "scripts": {
+        "dev": "node esbuild.config.mjs",
+        "build": "tsc && node esbuild.config.mjs production",
+        "test": "node --experimental-strip-types --test test/*.test.ts",
+        "lint": "biome check . && eslint .",
+        "lint:fix": "biome check --write . && eslint --fix .",
+        "format": "dprint fmt",
+        "format:check": "dprint check",
+        "check": "npm run format:check && npm run lint && tsc && npm test",
+        "version": "node scripts/version-bump.mjs && git add manifest.json versions.json"
+    },
+    "dependencies": {
+        "marked": "^18.1.1"
+    },
+    "devDependencies": {
+        "@biomejs/biome": "^2.6.3",
+        "@dprint/json": "^0.25.2",
+        "@dprint/typescript": "^0.96.1",
+        "@eslint/js": "^9.39.5",
+        "@eslint/json": "^0.14.0",
+        "@types/node": "^26.6.5",
+        "dprint": "^0.64.3",
+        "esbuild": "^0.28.2",
+        "eslint": "^9.39.5",
+        "eslint-plugin-obsidianmd": "^0.4.2",
+        "obsidian": "^1.14.4",
+        "typescript": "~5.9",
+        "typescript-eslint": "^8.72.0"
+    }
+}

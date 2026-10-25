@@ -1,0 +1,386 @@
+import { type App, FuzzySuggestModal, PluginSettingTab, type SettingDefinitionItem, type TFolder } from "obsidian";
+import type PlanePagesSync from "./main";
+
+export interface FolderLink
+{
+    projectId: string;
+    projectName: string;
+}
+
+export interface PageRecord
+{
+    pageId: string;
+    projectId: string;
+    hash: string;
+}
+
+export interface Settings
+{
+    tokenSecret: string; // name of the secret in Obsidian's secret storage, never the token itself
+    workspace: string;
+    selfHosted: boolean;
+    instanceUrl: string;
+    rootFolder: string;
+    autoPush: boolean;
+    debounceSec: number;
+    onDelete: "archive" | "keep";
+    links: Record<string, FolderLink>; // folder path -> project
+    pages: Record<string, PageRecord>; // file path -> last pushed state
+}
+
+export const PLANE_CLOUD_API = "https://api.plane.so";
+const LEGACY_TOKEN_SECRET = "plane-pages-sync-token";
+const CONNECTION_KEYS = new Set<string>(["tokenSecret", "workspace", "selfHosted", "instanceUrl"]);
+
+export const DEFAULTS: Settings = {
+    tokenSecret: "",
+    workspace: "",
+    selfHosted: false,
+    instanceUrl: "",
+    rootFolder: "Plane",
+    autoPush: true,
+    debounceSec: 5,
+    onDelete: "archive",
+    links: {},
+    pages: {},
+};
+
+interface LegacySettings
+{
+    apiKey?: string;
+    apiBase?: string;
+    appBase?: string;
+}
+
+/** Merges stored data with defaults and migrates settings from 0.1.x. */
+export function loadSettings(app: App, raw: unknown): { settings: Settings; migrated: boolean; }
+{
+    const stored = (raw ?? {}) as Partial<Settings> & LegacySettings;
+    const { apiKey, apiBase, appBase: _appBase, ...rest } = stored;
+    const settings: Settings = { ...DEFAULTS, ...rest, links: { ...rest.links }, pages: { ...rest.pages } };
+    let migrated = false;
+
+    // 0.1.x kept the token in data.json. Move it into secret storage.
+    if (apiKey && !settings.tokenSecret)
+    {
+        app.secretStorage.setSecret(LEGACY_TOKEN_SECRET, apiKey);
+        settings.tokenSecret = LEGACY_TOKEN_SECRET;
+        migrated = true;
+    }
+    if (apiBase !== undefined)
+    {
+        if (apiBase && apiBase !== PLANE_CLOUD_API)
+        {
+            settings.selfHosted = true;
+            settings.instanceUrl = normalizeUrl(apiBase);
+        }
+        migrated = true;
+    }
+    return { settings, migrated: migrated || _appBase !== undefined };
+}
+
+/** Accepts a bare slug or a pasted Plane URL like https://app.plane.so/labvent/projects/... */
+export function parseWorkspace(input: string): string
+{
+    const value = input.trim();
+    const match = /^https?:\/\/[^/]+\/([^/?#]+)/.exec(value);
+    return (match ? match[1] : value).replace(/^\/+|\/+$/g, "");
+}
+
+export function normalizeUrl(input: string): string
+{
+    const value = input.trim().replace(/\/+$/, "");
+    if (!value)
+    {
+        return "";
+    }
+    return /^https?:\/\//.test(value) ? value : `https://${value}`;
+}
+
+export class PlaneSettingTab extends PluginSettingTab
+{
+    private connectionStatus = "";
+
+    constructor(app: App, private plugin: PlanePagesSync)
+    {
+        super(app, plugin);
+    }
+
+    getControlValue(key: string): unknown
+    {
+        return this.plugin.settings[key as keyof Settings];
+    }
+
+    async setControlValue(key: string, value: unknown): Promise<void>
+    {
+        const s = this.plugin.settings as unknown as Record<string, unknown>;
+        if (key === "workspace" && typeof value === "string")
+        {
+            value = parseWorkspace(value);
+        }
+        if (key === "instanceUrl" && typeof value === "string")
+        {
+            value = normalizeUrl(value);
+        }
+        if (key === "rootFolder" && typeof value === "string")
+        {
+            value = value.trim().replace(/\/+$/, "");
+        }
+        s[key] = value;
+        if (CONNECTION_KEYS.has(key))
+        {
+            this.connectionStatus = "";
+            this.plugin.resetConnection();
+        }
+        await this.plugin.saveData(this.plugin.settings);
+        if (CONNECTION_KEYS.has(key))
+        {
+            this.update();
+        }
+    }
+
+    getSettingDefinitions(): SettingDefinitionItem[]
+    {
+        const s = this.plugin.settings;
+        const notConfigured = () => !this.plugin.configured;
+        const links = Object.entries(s.links).sort(([a], [b]) => a.localeCompare(b));
+        const synced = Object.keys(s.pages).length;
+
+        return [
+            // The first group has no heading, per Obsidian's settings guidelines.
+            {
+                type: "group",
+                items: [
+                    {
+                        name: "Personal access token",
+                        desc:
+                            "Create one in Plane under Profile settings → Personal access tokens. It's kept in Obsidian's secret storage, not in the plugin's data file.",
+                        aliases: ["api key", "token"],
+                        control: { type: "secret", key: "tokenSecret" },
+                    },
+                    {
+                        name: "Workspace",
+                        desc:
+                            "The workspace slug from your Plane links. You can also paste any link from that workspace.",
+                        aliases: ["slug"],
+                        control: {
+                            type: "text",
+                            key: "workspace",
+                            placeholder: "my-team",
+                            validate: (v) => /\s/.test(v.trim()) ? "Workspace slugs don't contain spaces." : undefined,
+                        },
+                    },
+                    {
+                        name: "Self-hosted Plane",
+                        desc: "Turn on if your workspace isn't on app.plane.so.",
+                        control: { type: "toggle", key: "selfHosted" },
+                    },
+                    {
+                        name: "Instance URL",
+                        desc: "The address you open Plane at.",
+                        visible: () => s.selfHosted,
+                        control: {
+                            type: "text",
+                            key: "instanceUrl",
+                            placeholder: "https://plane.example.com",
+                            validate: (v) =>
+                                v && !/^(https?:\/\/)?[^\s/]+\.[^\s]+$/.test(v.trim())
+                                    ? "Enter a full address."
+                                    : undefined,
+                        },
+                    },
+                    {
+                        name: "Connection",
+                        desc: this.connectionStatus
+                            || (this.plugin.configured ? "Not checked yet." : "Add a token and workspace first."),
+                        searchable: false,
+                        render: (setting) =>
+                        {
+                            setting.addButton((button) =>
+                                button
+                                    .setButtonText("Check connection")
+                                    .setDisabled(notConfigured())
+                                    .onClick(() => void this.checkConnection())
+                            );
+                        },
+                    },
+                ],
+            },
+            {
+                type: "group",
+                heading: "Folders",
+                items: [
+                    {
+                        name: "Projects folder",
+                        desc:
+                            "Folders inside this one link to the Plane project with the same name or identifier, so Plane/Clearline Books syncs to “Clearline Books”. Leave empty to only use folders you link yourself.",
+                        aliases: ["root folder"],
+                        control: { type: "folder", key: "rootFolder", placeholder: "Plane" },
+                    },
+                ],
+            },
+            {
+                type: "list",
+                heading: "Linked folders",
+                emptyState:
+                    "No folders linked yet. Add one here, right-click a folder in the file explorer, or create one inside the projects folder.",
+                addItem: { name: "Link a folder", action: () => this.linkNewFolder() },
+                onDelete: (index) => void this.unlink(links[index]?.[0]),
+                items: links.map(([path, link]) => ({
+                    name: path,
+                    desc: this.app.vault.getFolderByPath(path)
+                        ? `→ ${link.projectName}`
+                        : `→ ${link.projectName} (folder no longer exists)`,
+                    searchable: false,
+                    action: () => this.changeProject(path),
+                })),
+            },
+            {
+                type: "group",
+                heading: "Syncing",
+                items: [
+                    {
+                        name: "Sync on save",
+                        desc:
+                            "Push a note to Plane shortly after you stop editing it. Turn off to only push with commands.",
+                        aliases: ["auto push", "automatic"],
+                        control: { type: "toggle", key: "autoPush" },
+                    },
+                    {
+                        name: "Wait before pushing",
+                        desc: "Seconds of inactivity before a changed note is pushed.",
+                        aliases: ["delay", "debounce"],
+                        control: {
+                            type: "slider",
+                            key: "debounceSec",
+                            min: 2,
+                            max: 60,
+                            step: 1,
+                            displayFormat: (v: number) => `${v}s`,
+                            disabled: () => !s.autoPush,
+                        },
+                    },
+                    {
+                        name: "Deleted notes",
+                        desc: "What happens to the Plane page when you delete its note.",
+                        control: {
+                            type: "dropdown",
+                            key: "onDelete",
+                            options: { archive: "Archive the page", keep: "Keep the page" },
+                        },
+                    },
+                    {
+                        name: "Push everything now",
+                        desc: `${synced} note${synced === 1 ? "" : "s"} synced so far. Unchanged notes are skipped.`,
+                        render: (setting) =>
+                        {
+                            setting.addButton((button) =>
+                                button
+                                    .setButtonText("Push all")
+                                    .setDisabled(notConfigured())
+                                    .onClick(() =>
+                                    {
+                                        button.setDisabled(true);
+                                        void this.plugin.pushAll().finally(() => this.update());
+                                    })
+                            );
+                        },
+                    },
+                ],
+            },
+        ];
+    }
+
+    private async checkConnection()
+    {
+        try
+        {
+            const projects = await this.plugin.getProjects(true);
+            const count = `${projects.length} project${projects.length === 1 ? "" : "s"}`;
+            this.connectionStatus = `✓ Connected to “${this.plugin.settings.workspace}”, ${count} found.`;
+        }
+        catch (error)
+        {
+            this.connectionStatus = `✗ ${describeError(error)}`;
+        }
+        this.update();
+    }
+
+    private linkNewFolder()
+    {
+        if (!this.plugin.configured)
+        {
+            this.connectionStatus = "Add a token and workspace before linking folders.";
+            this.update();
+            return;
+        }
+        new FolderPickerModal(this.app, (folder) =>
+            this.plugin.pickProject((project) =>
+            {
+                this.plugin.linkFolder(folder, project);
+                this.update();
+            })).open();
+    }
+
+    private changeProject(path: string)
+    {
+        const folder = this.app.vault.getFolderByPath(path);
+        if (!folder)
+        {
+            return;
+        }
+        this.plugin.pickProject((project) =>
+        {
+            this.plugin.linkFolder(folder, project);
+            this.update();
+        });
+    }
+
+    private async unlink(path: string | undefined)
+    {
+        if (path)
+        {
+            delete this.plugin.settings.links[path];
+            await this.plugin.saveData(this.plugin.settings);
+        }
+        this.update();
+    }
+}
+
+function describeError(error: unknown): string
+{
+    const status = (error as { status?: number; } | null)?.status;
+    if (status === 401 || status === 403)
+    {
+        return "Plane rejected the token. Check that it's correct and hasn't expired.";
+    }
+    if (status === 404)
+    {
+        return "Workspace not found. Check the slug, or the instance URL if you're self-hosted.";
+    }
+    return error instanceof Error ? error.message : String(error);
+}
+
+class FolderPickerModal extends FuzzySuggestModal<TFolder>
+{
+    constructor(app: App, private onPick: (folder: TFolder) => void)
+    {
+        super(app);
+        this.setPlaceholder("Pick a folder to link");
+    }
+
+    getItems(): TFolder[]
+    {
+        return this.app.vault.getAllFolders(false);
+    }
+
+    getItemText(folder: TFolder)
+    {
+        return folder.path;
+    }
+
+    onChooseItem(folder: TFolder)
+    {
+        this.onPick(folder);
+    }
+}

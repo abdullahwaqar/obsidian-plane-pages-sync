@@ -1,0 +1,765 @@
+import {
+    type App,
+    debounce,
+    FuzzySuggestModal,
+    type Menu,
+    Notice,
+    normalizePath,
+    Plugin,
+    type TAbstractFile,
+    TFile,
+    TFolder,
+} from "obsidian";
+import { markdownToPlaneHtml } from "./convert";
+import { PlaneClient, PlaneError, type PlaneProject } from "./plane";
+import { type FolderLink, loadSettings, PLANE_CLOUD_API, PlaneSettingTab, type Settings } from "./settings";
+
+const FM_PAGE = "plane_page";
+const FM_PROJECT = "plane_project";
+const FM_SKIP = "plane_sync";
+
+type PushResult = "created" | "updated" | "unchanged" | "skipped" | "failed";
+
+interface PlaneFrontmatter
+{
+    pageId?: string;
+    projectId?: string;
+    excluded: boolean;
+}
+
+export default class PlanePagesSync extends Plugin
+{
+    settings!: Settings;
+    client!: PlaneClient;
+    private projects: PlaneProject[] | null = null;
+    private timers = new Map<string, number>();
+    private inFlight = 0;
+    private lastError = "";
+    private statusEl!: HTMLElement;
+    private needsSecondPass = new Set<string>();
+
+    async onload()
+    {
+        await this.loadSettings();
+        this.client = new PlaneClient(() => ({
+            apiBase: this.apiBase(),
+            apiKey: this.token(),
+            workspace: this.settings.workspace,
+        }));
+
+        this.statusEl = this.addStatusBarItem();
+        this.statusEl.addClass("mod-clickable");
+        this.statusEl.onClickEvent(() =>
+        {
+            if (this.lastError)
+            {
+                new Notice(`Plane sync: ${this.lastError}`, 10000);
+            }
+            else
+            {
+                void this.pushAll();
+            }
+        });
+        this.renderStatus();
+
+        this.addRibbonIcon("upload-cloud", "Push notes to Plane", () => void this.pushAll());
+        this.addSettingTab(new PlaneSettingTab(this.app, this));
+        this.registerCommands();
+        this.registerMenus();
+
+        this.app.workspace.onLayoutReady(() =>
+        {
+            this.registerEvent(this.app.vault.on("modify", (f) => this.onModify(f)));
+            this.registerEvent(this.app.vault.on("rename", (f, old) => this.onRename(f, old)));
+            this.registerEvent(this.app.vault.on("delete", (f) => void this.onDelete(f)));
+        });
+    }
+
+    onunload()
+    {
+        for (const t of this.timers.values())
+        {
+            window.clearTimeout(t);
+        }
+    }
+
+    async loadSettings()
+    {
+        const { settings, migrated } = loadSettings(this.app, await this.loadData());
+        this.settings = settings;
+        if (migrated)
+        {
+            await this.saveData(this.settings);
+        }
+    }
+
+    saveSettings = debounce(() => void this.saveData(this.settings), 500, true);
+
+    resetConnection()
+    {
+        this.projects = null;
+        this.lastError = "";
+        this.renderStatus();
+    }
+
+    /** The token lives in Obsidian's secret storage; settings only keep its name. */
+    token(): string
+    {
+        return this.settings.tokenSecret ? this.app.secretStorage.getSecret(this.settings.tokenSecret) ?? "" : "";
+    }
+
+    apiBase(): string
+    {
+        return this.settings.selfHosted ? this.settings.instanceUrl : PLANE_CLOUD_API;
+    }
+
+    get configured()
+    {
+        return !!(this.token() && this.settings.workspace && this.apiBase());
+    }
+
+    appBase()
+    {
+        return this.settings.selfHosted ? this.settings.instanceUrl : "https://app.plane.so";
+    }
+
+    private frontmatter(file: TFile): PlaneFrontmatter
+    {
+        const fm: Record<string, unknown> = this.app.metadataCache.getFileCache(file)?.frontmatter ?? {};
+        const str = (v: unknown) => typeof v === "string" && v ? v : undefined;
+        return { pageId: str(fm[FM_PAGE]), projectId: str(fm[FM_PROJECT]), excluded: fm[FM_SKIP] === false };
+    }
+
+    pageUrl(projectId: string, pageId: string)
+    {
+        return `${this.appBase()}/${this.settings.workspace}/projects/${projectId}/pages/${pageId}`;
+    }
+
+    private renderStatus()
+    {
+        const pending = this.timers.size + this.inFlight;
+        let text = "Plane";
+        if (!this.configured)
+        {
+            text = "Plane: not set up";
+        }
+        else if (this.lastError)
+        {
+            text = "Plane: error";
+        }
+        else if (pending)
+        {
+            text = `Plane: syncing ${pending}`;
+        }
+        else
+        {
+            text = "Plane: synced";
+        }
+        this.statusEl.setText(text);
+        this.statusEl.setAttr("aria-label", this.lastError || "Click to push all linked folders");
+    }
+
+    async getProjects(refresh = false): Promise<PlaneProject[]>
+    {
+        if (!this.projects || refresh)
+        {
+            this.projects = await this.client.listProjects();
+        }
+        return this.projects;
+    }
+
+    /** Nearest linked ancestor folder, or auto-link a folder under the root that matches a project name. */
+    async projectFor(file: TFile): Promise<FolderLink | null>
+    {
+        for (let f: TFolder | null = file.parent; f && !f.isRoot(); f = f.parent)
+        {
+            const link = this.settings.links[f.path];
+            if (link)
+            {
+                return link;
+            }
+        }
+        const root = normalizePath(this.settings.rootFolder || "");
+        if (!root || !file.path.startsWith(`${root}/`))
+        {
+            return null;
+        }
+
+        // Auto-link: Plane/<Project Name>/... matches a project by name or identifier.
+        const top = file.path.slice(root.length + 1).split("/")[0];
+        if (!top || top === file.name)
+        {
+            return null;
+        }
+        const folderPath = `${root}/${top}`;
+        const projects = await this.getProjects();
+        const want = top.trim().toLowerCase();
+        const match = projects.find((p) =>
+            p.name.trim().toLowerCase() === want || p.identifier?.toLowerCase() === want
+        );
+        if (!match)
+        {
+            return null;
+        }
+        const link = { projectId: match.id, projectName: match.name };
+        this.settings.links[folderPath] = link;
+        this.saveSettings();
+        new Notice(`Linked "${folderPath}" to Plane project "${match.name}"`);
+        return link;
+    }
+
+    linkFolder(folder: TFolder, project: PlaneProject)
+    {
+        // Drop links on descendants so the new link wins for the whole subtree.
+        for (const p of Object.keys(this.settings.links))
+        {
+            if (p === folder.path || p.startsWith(`${folder.path}/`))
+            {
+                delete this.settings.links[p];
+            }
+        }
+        this.settings.links[folder.path] = { projectId: project.id, projectName: project.name };
+        this.saveSettings();
+        new Notice(`"${folder.path}" now syncs to Plane project "${project.name}"`);
+    }
+
+    unlinkFolder(folder: TFolder)
+    {
+        delete this.settings.links[folder.path];
+        this.saveSettings();
+        new Notice(`"${folder.path}" is no longer linked to Plane`);
+    }
+
+    private hash(s: string)
+    {
+        let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
+        for (let i = 0; i < s.length; i++)
+        {
+            const c = s.charCodeAt(i);
+            h1 = Math.imul(h1 ^ c, 2654435761);
+            h2 = Math.imul(h2 ^ c, 1597334677);
+        }
+        h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+        h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+        return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36);
+    }
+
+    private toHtml(file: TFile, content: string)
+    {
+        let pendingLink = false;
+        const html = markdownToPlaneHtml(content, {
+            resolveLink: (target) =>
+            {
+                const dest = this.app.metadataCache.getFirstLinkpathDest(target, file.path);
+                if (!dest)
+                {
+                    return null;
+                }
+                const fm = this.frontmatter(dest);
+                if (fm.pageId && fm.projectId)
+                {
+                    return { title: dest.basename, url: this.pageUrl(fm.projectId, fm.pageId) };
+                }
+                if (dest.extension === "md")
+                {
+                    pendingLink = true; // may get a page later in this batch
+                }
+                return { title: dest.basename };
+            },
+        });
+        return { html, pendingLink };
+    }
+
+    async pushFile(file: TFile, opts: { force?: boolean; quiet?: boolean; } = {}): Promise<PushResult>
+    {
+        if (file.extension !== "md" || !this.configured)
+        {
+            return "skipped";
+        }
+        this.inFlight++;
+        this.renderStatus();
+        try
+        {
+            const fm = this.frontmatter(file);
+            if (fm.excluded)
+            {
+                return "skipped";
+            }
+
+            const link = await this.projectFor(file);
+            if (!link)
+            {
+                if (!opts.quiet)
+                {
+                    new Notice(
+                        `"${file.parent?.path}" isn't linked to a Plane project. Right-click the folder and choose “Link to Plane project”.`,
+                    );
+                }
+                return "skipped";
+            }
+
+            const content = await this.app.vault.cachedRead(file);
+            const { html, pendingLink } = this.toHtml(file, content);
+            if (pendingLink)
+            {
+                this.needsSecondPass.add(file.path);
+            }
+            const name = file.basename;
+            const hash = this.hash(`${name}\n${html}`);
+
+            let pageId = fm.pageId;
+            const pageProject = fm.projectId;
+            const rec = this.settings.pages[file.path];
+
+            // Note moved to a folder linked to a different project: Plane can't move pages, so recreate.
+            if (pageId && pageProject && pageProject !== link.projectId)
+            {
+                await this.client.archivePage(pageProject, pageId).catch(() => undefined);
+                pageId = undefined;
+            }
+
+            if (pageId && !opts.force && rec?.pageId === pageId && rec.hash === hash)
+            {
+                return "unchanged";
+            }
+
+            let result: PushResult = "updated";
+            if (pageId)
+            {
+                try
+                {
+                    await this.client.updatePage(link.projectId, pageId, name, html);
+                }
+                catch (e)
+                {
+                    if (e instanceof PlaneError && e.status === 404)
+                    {
+                        pageId = undefined; // deleted in Plane: recreate
+                    }
+                    else if (e instanceof PlaneError && e.status === 400)
+                    {
+                        const page = await this.client.getPage(link.projectId, pageId).catch(() => null);
+                        if (page?.is_locked)
+                        {
+                            throw new Error(`"${name}" is locked in Plane. Unlock it to keep syncing.`);
+                        }
+                        if (page?.archived_at)
+                        {
+                            await this.client.restorePage(link.projectId, pageId);
+                            await this.client.updatePage(link.projectId, pageId, name, html);
+                        }
+                        else
+                        {
+                            throw e;
+                        }
+                    }
+                    else
+                    {
+                        throw e;
+                    }
+                }
+            }
+            if (!pageId)
+            {
+                const page = await this.client.createPage(link.projectId, name, html, file.path);
+                pageId = page.id;
+                result = "created";
+                const id = pageId;
+                await this.app.fileManager.processFrontMatter(file, (f: Record<string, unknown>) =>
+                {
+                    f[FM_PAGE] = id;
+                    f[FM_PROJECT] = link.projectId;
+                });
+            }
+
+            this.settings.pages[file.path] = { pageId: pageId, projectId: link.projectId, hash };
+            this.saveSettings();
+            this.lastError = "";
+            return result;
+        }
+        catch (e)
+        {
+            this.lastError = e instanceof Error ? e.message : String(e);
+            if (!opts.quiet)
+            {
+                new Notice(`Plane sync failed: ${this.lastError}`, 8000);
+            }
+            console.error("[plane-pages-sync]", e);
+            return "failed";
+        }
+        finally
+        {
+            this.inFlight--;
+            this.renderStatus();
+        }
+    }
+
+    private filesInLinkedFolders(): TFile[]
+    {
+        const root = normalizePath(this.settings.rootFolder || "");
+        const linked = Object.keys(this.settings.links);
+        return this.app.vault.getMarkdownFiles().filter((f) =>
+            linked.some((p) => f.path.startsWith(`${p}/`)) || (root && f.path.startsWith(`${root}/`))
+        );
+    }
+
+    async pushMany(files: TFile[], label: string)
+    {
+        if (!this.configured)
+        {
+            return new Notice("Add your Plane token and workspace in this plugin's settings first.");
+        }
+        const counts: Record<PushResult, number> = { created: 0, updated: 0, unchanged: 0, skipped: 0, failed: 0 };
+        const notice = new Notice(`Pushing ${files.length} notes to Plane...`, 0);
+        this.needsSecondPass.clear();
+        for (const [i, f] of files.entries())
+        {
+            notice.setMessage(`Pushing to Plane: ${i + 1}/${files.length}\n${f.basename}`);
+            counts[await this.pushFile(f, { quiet: true })]++;
+        }
+        // Notes that linked to notes created in this batch can now point at real Plane URLs.
+        const again = files.filter((f) => this.needsSecondPass.has(f.path));
+        for (const f of again)
+        {
+            await this.pushFile(f, { quiet: true });
+        }
+        notice.hide();
+        const parts = (["created", "updated", "unchanged", "failed"] as const).filter((k) => counts[k]).map((k) =>
+            `${counts[k]} ${k}`
+        );
+        new Notice(
+            `${label}: ${parts.join(", ") || "nothing to sync"}${counts.failed ? `\n${this.lastError}` : ""}`,
+            counts.failed ? 10000 : 4000,
+        );
+    }
+
+    pushAll()
+    {
+        return this.pushMany(this.filesInLinkedFolders(), "Plane sync");
+    }
+
+    pushFolder(folder: TFolder)
+    {
+        const files = this.app.vault.getMarkdownFiles().filter((f) => f.path.startsWith(`${folder.path}/`));
+        return this.pushMany(files, `"${folder.name}"`);
+    }
+
+
+    private isTracked(file: TFile)
+    {
+        if (this.settings.pages[file.path])
+        {
+            return true;
+        }
+        const root = normalizePath(this.settings.rootFolder || "");
+        if (root && file.path.startsWith(`${root}/`))
+        {
+            return true;
+        }
+        return Object.keys(this.settings.links).some((p) => file.path.startsWith(`${p}/`));
+    }
+
+    private schedule(file: TFile)
+    {
+        const prev = this.timers.get(file.path);
+        if (prev)
+        {
+            window.clearTimeout(prev);
+        }
+        const t = window.setTimeout(() =>
+        {
+            this.timers.delete(file.path);
+            const current = this.app.vault.getAbstractFileByPath(file.path);
+            if (current instanceof TFile)
+            {
+                void this.pushFile(current, { quiet: true });
+            }
+            this.renderStatus();
+        }, Math.max(1, this.settings.debounceSec) * 1000);
+        this.timers.set(file.path, t);
+        this.renderStatus();
+    }
+
+    private onModify(f: TAbstractFile)
+    {
+        if (!this.settings.autoPush || !this.configured)
+        {
+            return;
+        }
+        if (f instanceof TFile && f.extension === "md" && this.isTracked(f))
+        {
+            this.schedule(f);
+        }
+    }
+
+    private onRename(f: TAbstractFile, oldPath: string)
+    {
+        if (f instanceof TFolder)
+        {
+            // Keep folder links and page records pointing at the new paths.
+            for (const key of Object.keys(this.settings.links))
+            {
+                if (key === oldPath || key.startsWith(`${oldPath}/`))
+                {
+                    this.settings.links[f.path + key.slice(oldPath.length)] = this.settings.links[key];
+                    delete this.settings.links[key];
+                }
+            }
+            for (const key of Object.keys(this.settings.pages))
+            {
+                if (key.startsWith(`${oldPath}/`))
+                {
+                    this.settings.pages[f.path + key.slice(oldPath.length)] = this.settings.pages[key];
+                    delete this.settings.pages[key];
+                }
+            }
+            this.saveSettings();
+            return;
+        }
+        if (!(f instanceof TFile))
+        {
+            return;
+        }
+        const rec = this.settings.pages[oldPath];
+        if (rec)
+        {
+            this.settings.pages[f.path] = rec;
+            delete this.settings.pages[oldPath];
+            this.saveSettings();
+        }
+        if (this.settings.autoPush && f.extension === "md" && this.isTracked(f))
+        {
+            this.schedule(f);
+        }
+    }
+
+    private async onDelete(f: TAbstractFile)
+    {
+        if (!(f instanceof TFile))
+        {
+            return;
+        }
+        const rec = this.settings.pages[f.path];
+        if (!rec)
+        {
+            return;
+        }
+        delete this.settings.pages[f.path];
+        this.saveSettings();
+        if (this.settings.onDelete === "archive" && this.configured)
+        {
+            try
+            {
+                await this.client.archivePage(rec.projectId, rec.pageId);
+                new Notice(`Archived "${f.basename}" in Plane`);
+            }
+            catch (e)
+            {
+                console.error("[plane-pages-sync] archive failed", e);
+            }
+        }
+    }
+
+
+    private registerCommands()
+    {
+        this.addCommand({
+            id: "push-current",
+            name: "Push current note",
+            checkCallback: (checking) =>
+            {
+                const f = this.app.workspace.getActiveFile();
+                if (f?.extension !== "md")
+                {
+                    return false;
+                }
+                if (!checking)
+                {
+                    void this.pushFile(f, { force: true }).then((r) =>
+                        r !== "failed" && r !== "skipped" && new Notice(`Plane: ${r} "${f.basename}"`)
+                    );
+                }
+                return true;
+            },
+        });
+        this.addCommand({ id: "push-all", name: "Push all linked folders", callback: () => void this.pushAll() });
+        this.addCommand({
+            id: "link-folder",
+            name: "Link current note's folder to a project",
+            checkCallback: (checking) =>
+            {
+                const folder = this.app.workspace.getActiveFile()?.parent;
+                if (!folder || folder.isRoot())
+                {
+                    return false;
+                }
+                if (!checking)
+                {
+                    this.pickProject((p) => this.linkFolder(folder, p));
+                }
+                return true;
+            },
+        });
+        this.addCommand({
+            id: "new-project-folder",
+            name: "Create folder for a project",
+            callback: () =>
+                this.pickProject(async (p) =>
+                {
+                    const path = normalizePath(
+                        `${this.settings.rootFolder || ""}/${p.name.replace(/[\\/:*?"<>|]/g, "-")}`,
+                    );
+                    if (!this.app.vault.getAbstractFileByPath(path))
+                    {
+                        await this.app.vault.createFolder(path);
+                    }
+                    const folder = this.app.vault.getAbstractFileByPath(path);
+                    if (folder instanceof TFolder)
+                    {
+                        this.linkFolder(folder, p);
+                    }
+                }),
+        });
+        this.addCommand({
+            id: "open-in-plane",
+            name: "Open current note in Plane",
+            checkCallback: (checking) =>
+            {
+                const f = this.app.workspace.getActiveFile();
+                const url = f && this.urlFor(f);
+                if (!url)
+                {
+                    return false;
+                }
+                if (!checking)
+                {
+                    window.open(url);
+                }
+                return true;
+            },
+        });
+        this.addCommand({
+            id: "copy-plane-link",
+            name: "Copy Plane link for current note",
+            checkCallback: (checking) =>
+            {
+                const f = this.app.workspace.getActiveFile();
+                const url = f && this.urlFor(f);
+                if (!url)
+                {
+                    return false;
+                }
+                if (!checking)
+                {
+                    void navigator.clipboard.writeText(url).then(() => new Notice("Plane link copied"));
+                }
+                return true;
+            },
+        });
+        this.addCommand({
+            id: "exclude-current",
+            name: "Stop syncing current note",
+            checkCallback: (checking) =>
+            {
+                const f = this.app.workspace.getActiveFile();
+                if (f?.extension !== "md")
+                {
+                    return false;
+                }
+                if (!checking)
+                {
+                    void this.app.fileManager.processFrontMatter(f, (fm: Record<string, unknown>) =>
+                    {
+                        fm[FM_SKIP] = false;
+                    })
+                        .then(() =>
+                            new Notice(
+                                `"${f.basename}" won't sync to Plane. Remove ${FM_SKIP} from its properties to resume.`,
+                            )
+                        );
+                }
+                return true;
+            },
+        });
+    }
+
+    urlFor(file: TFile): string | null
+    {
+        const fm = this.frontmatter(file);
+        return fm.pageId && fm.projectId ? this.pageUrl(fm.projectId, fm.pageId) : null;
+    }
+
+    private registerMenus()
+    {
+        this.registerEvent(this.app.workspace.on("file-menu", (menu: Menu, f: TAbstractFile) =>
+        {
+            if (f instanceof TFolder && !f.isRoot())
+            {
+                const link = this.settings.links[f.path];
+                menu.addItem((i) =>
+                    i.setTitle(link ? `Change Plane project (${link.projectName})` : "Link to Plane project…")
+                        .setIcon("link").onClick(() => this.pickProject((p) => this.linkFolder(f, p)))
+                );
+                if (link)
+                {
+                    menu.addItem((i) =>
+                        i.setTitle("Push folder to Plane").setIcon("upload-cloud").onClick(() =>
+                            void this.pushFolder(f)
+                        )
+                    );
+                    menu.addItem((i) =>
+                        i.setTitle("Unlink from Plane").setIcon("unlink").onClick(() => this.unlinkFolder(f))
+                    );
+                }
+            }
+            else if (f instanceof TFile && f.extension === "md")
+            {
+                const url = this.urlFor(f);
+                menu.addItem((i) =>
+                    i.setTitle("Push to Plane").setIcon("upload-cloud")
+                        .onClick(() => void this.pushFile(f, { force: true }))
+                );
+                if (url)
+                {
+                    menu.addItem((i) =>
+                        i.setTitle("Open in Plane").setIcon("external-link").onClick(() => window.open(url))
+                    );
+                }
+            }
+        }));
+    }
+
+    pickProject(onPick: (p: PlaneProject) => void | Promise<void>)
+    {
+        if (!this.configured)
+        {
+            return new Notice("Add your Plane token and workspace in this plugin's settings first.");
+        }
+        this.getProjects(true)
+            .then((projects) => new ProjectModal(this.app, projects, onPick).open())
+            .catch((e: unknown) =>
+                new Notice(`Couldn't load Plane projects: ${e instanceof Error ? e.message : String(e)}`, 8000)
+            );
+    }
+}
+
+export class ProjectModal extends FuzzySuggestModal<PlaneProject>
+{
+    constructor(app: App, private projects: PlaneProject[], private onPick: (p: PlaneProject) => void | Promise<void>)
+    {
+        super(app);
+        this.setPlaceholder("Pick a Plane project");
+    }
+    getItems()
+    {
+        return this.projects;
+    }
+    getItemText(p: PlaneProject)
+    {
+        return `${p.name}${p.identifier ? `  (${p.identifier})` : ""}`;
+    }
+    onChooseItem(p: PlaneProject)
+    {
+        void this.onPick(p);
+    }
+}
