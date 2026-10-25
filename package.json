@@ -19,7 +19,11 @@
         "format": "dprint fmt",
         "format:check": "dprint check",
         "check": "npm run format:check && npm run lint && tsc && npm test",
-        "version": "node scripts/version-bump.mjs && git add manifest.json versions.json"
+        "version": "node scripts/version-bump.mjs && git add manifest.json versions.json",
+        "prepare": "simple-git-hooks"
+    },
+    "simple-git-hooks": {
+        "pre-commit": "npx dprint fmt --staged && git add -u"
     },
     "dependencies": {
         "marked": "^18.1.1"

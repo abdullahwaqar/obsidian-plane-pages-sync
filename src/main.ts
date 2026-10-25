@@ -444,7 +444,6 @@ export default class PlanePagesSync extends Plugin
         return this.pushMany(files, `"${folder.name}"`);
     }
 
-
     private isTracked(file: TFile)
     {
         if (this.settings.pages[file.path])
@@ -559,7 +558,6 @@ export default class PlanePagesSync extends Plugin
             }
         }
     }
-
 
     private registerCommands()
     {
