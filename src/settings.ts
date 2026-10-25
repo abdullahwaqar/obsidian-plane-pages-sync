@@ -360,6 +360,20 @@ export class PlaneSettingTab extends PluginSettingTab
                         },
                     },
                     {
+                        name: "Clean up duplicates",
+                        desc:
+                            "Find copies left by a sync problem and remove them from Plane and your vault. You'll see what will be removed first.",
+                        render: (setting) =>
+                        {
+                            setting.addButton((button) =>
+                                button
+                                    .setButtonText("Find duplicates")
+                                    .setDisabled(!this.plugin.configured)
+                                    .onClick(() => void this.plugin.cleanUpStickies())
+                            );
+                        },
+                    },
+                    {
                         name: "Sticky board",
                         desc: "A panel of your stickies you can write in, recolour and delete.",
                         render: (setting) =>

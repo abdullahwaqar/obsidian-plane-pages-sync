@@ -4,8 +4,12 @@
 // For every sticky we remember the content hash on both sides at the last sync. On each pull:
 //   - only Plane changed    -> rewrite the note
 //   - only the note changed -> push it
-//   - both changed          -> the newer version wins and the other is kept as a "(conflict)" copy,
-//                              which itself becomes a new sticky, so nothing is lost.
+//   - both changed          -> the newer version wins; the other is saved in Conflicts/ as a plain
+//                              note that is never synced, so conflicts can't multiply.
+//
+// Only notes directly in the folder that carry `plane_sticky` or `plane_color` are stickies.
+// Anything else (index notes from other plugins, conflict copies, your own notes) is ignored.
+// If a sync run goes wrong (several conflicts, or many new stickies at once) sync pauses itself.
 import { Events, getFrontMatterInfo, Notice, normalizePath, parseYaml, type TFile } from "obsidian";
 import type PlanePagesSync from "./main";
 import { PlaneError, type PlaneSticky } from "./plane";
@@ -25,8 +29,19 @@ import { errorMessage, hash, isInFolder, withLock } from "./util";
 export const FM_STICKY = "plane_sticky";
 export const FM_COLOR = "plane_color";
 
+const MAX_CONFLICTS_PER_PULL = 2;
+
+export interface CleanupPlan
+{
+    remote: PlaneSticky[];
+    notes: TFile[];
+    preview: string[];
+}
+const MAX_CREATES_PER_MINUTE = 10;
+
 interface LocalSticky
 {
+    managed: boolean; // has plane_sticky or plane_color
     id?: string;
     color: StickyColor;
     body: string;
@@ -51,6 +66,8 @@ export class StickySync extends Events
 {
     private timers = new Map<string, number>();
     private pulling: Promise<void> | null = null;
+    private recentCreates: number[] = [];
+    private conflictsThisPull = 0;
     lastPull = 0;
     lastError = "";
 
@@ -80,14 +97,41 @@ export class StickySync extends Events
         return f ? normalizePath(f) : "";
     }
 
+    /** Anything inside the stickies folder, including Conflicts/. Kept out of page sync. */
     isStickyFile(file: TFile)
     {
         return file.extension === "md" && isInFolder(file.path, this.folder);
     }
 
+    /** Only notes directly in the folder can be stickies; subfolders like Conflicts/ never sync. */
+    isCandidate(file: TFile)
+    {
+        return file.extension === "md" && file.parent?.path === this.folder;
+    }
+
     files(): TFile[]
     {
-        return this.app.vault.getMarkdownFiles().filter((f) => this.isStickyFile(f));
+        return this.app.vault.getMarkdownFiles().filter((f) => this.isCandidate(f));
+    }
+
+    get conflictsFolder()
+    {
+        return `${this.folder}/Conflicts`;
+    }
+
+    /** Stops syncing and tells the user why. Used when something looks like it's running away. */
+    pause(reason: string)
+    {
+        if (!this.settings.stickiesEnabled)
+        {
+            return;
+        }
+        this.settings.stickiesEnabled = false;
+        this.destroy();
+        this.plugin.saveSettings();
+        this.lastError = `Paused: ${reason}`;
+        new Notice(`Sticky sync paused: ${reason} Turn it back on in settings once you've checked.`, 0);
+        this.changed();
     }
 
     get pending()
@@ -130,7 +174,8 @@ export class StickySync extends Events
         const body = content.slice(info.contentStart);
         const color = isStickyColor(fm[FM_COLOR]) ? fm[FM_COLOR] : "gray";
         const id = typeof fm[FM_STICKY] === "string" && fm[FM_STICKY] ? fm[FM_STICKY] : undefined;
-        return { id, color, body, hash: contentHash(body, color) };
+        const managed = FM_STICKY in fm || FM_COLOR in fm;
+        return { managed, id, color, body, hash: contentHash(body, color) };
     }
 
     /** Replaces the note body, keeping any other properties the user added. */
@@ -163,23 +208,30 @@ export class StickySync extends Events
         });
     }
 
-    private async uniquePath(title: string)
+    private async uniquePath(title: string, dir = this.folder)
     {
-        await this.ensureFolder();
-        let path = normalizePath(`${this.folder}/${title}.md`);
+        await this.ensureFolder(dir);
+        let path = normalizePath(`${dir}/${title}.md`);
         for (let i = 2; this.app.vault.getAbstractFileByPath(path); i++)
         {
-            path = normalizePath(`${this.folder}/${title} ${i}.md`);
+            path = normalizePath(`${dir}/${title} ${i}.md`);
         }
         return path;
     }
 
-    private async ensureFolder()
+    private async ensureFolder(dir: string)
     {
-        if (!this.app.vault.getFolderByPath(this.folder))
+        if (!this.app.vault.getFolderByPath(dir))
         {
-            await this.app.vault.createFolder(this.folder);
+            await this.app.vault.createFolder(dir);
         }
+    }
+
+    /** Saves the losing side of a conflict as a plain note in Conflicts/. It never syncs. */
+    private async saveConflictCopy(body: string)
+    {
+        const path = await this.uniquePath(`${stickyTitle(body)} (${stamp()})`, this.conflictsFolder);
+        await this.app.vault.create(path, `${body.trim()}\n`);
     }
 
     private async createNote(title: string, body: string, color: StickyColor, id?: string): Promise<TFile>
@@ -245,13 +297,17 @@ export class StickySync extends Events
     {
         return withLock(`sticky:${file.path}`, async () =>
         {
-            if (!this.enabled || !this.plugin.configured || !this.isStickyFile(file))
+            if (!this.enabled || !this.plugin.configured || !this.isCandidate(file))
             {
                 return;
             }
             try
             {
                 const local = await this.readLocal(file);
+                if (!local.managed)
+                {
+                    return; // not a sticky: no plane_sticky / plane_color property
+                }
                 const html = stickyMarkdownToHtml(local.body);
                 const input = {
                     description_html: html,
@@ -285,6 +341,14 @@ export class StickySync extends Events
                 }
                 if (!id)
                 {
+                    const now = Date.now();
+                    this.recentCreates = this.recentCreates.filter((t) => now - t < 60_000);
+                    if (this.recentCreates.length >= MAX_CREATES_PER_MINUTE)
+                    {
+                        this.pause("too many new stickies in a minute.");
+                        return;
+                    }
+                    this.recentCreates.push(now);
                     sticky = await this.plugin.client.createSticky(input);
                     id = sticky.id;
                     await this.setProps(file, { id, color: local.color });
@@ -363,6 +427,7 @@ export class StickySync extends Events
         this.changed();
         try
         {
+            this.conflictsThisPull = 0;
             const remote = await this.plugin.client.listStickies();
             const seen = new Set<string>();
             const byId = new Map<string, TFile>();
@@ -377,8 +442,17 @@ export class StickySync extends Events
 
             for (const sticky of remote)
             {
+                if (!this.enabled)
+                {
+                    return; // paused mid-run
+                }
                 seen.add(sticky.id);
                 await withLock(`sticky-id:${sticky.id}`, () => this.reconcile(sticky, byId.get(sticky.id)));
+            }
+
+            if (!this.enabled)
+            {
+                return;
             }
 
             // Gone from Plane.
@@ -482,6 +556,14 @@ export class StickySync extends Events
         }
 
         // Both sides changed since the last sync.
+        this.conflictsThisPull++;
+        if (this.conflictsThisPull > MAX_CONFLICTS_PER_PULL)
+        {
+            this.pause(
+                "several stickies changed in both places at once, which usually means another plugin is editing them.",
+            );
+            return;
+        }
         const remoteTime = Date.parse(sticky.updated_at ?? "") || 0;
         const localWins = file.stat.mtime >= remoteTime;
         const timer = this.timers.get(file.path);
@@ -492,7 +574,7 @@ export class StickySync extends Events
         }
         if (localWins)
         {
-            await this.createNote(`${stickyTitle(remoteBody)} (conflict ${stamp()})`, remoteBody, color);
+            await this.saveConflictCopy(remoteBody);
             if (rec)
             {
                 rec.remoteHash = remoteHash;
@@ -501,11 +583,11 @@ export class StickySync extends Events
         }
         else
         {
-            await this.createNote(`${stickyTitle(local.body)} (conflict ${stamp()})`, local.body, local.color);
+            await this.saveConflictCopy(local.body);
             await this.applyRemote(file, remoteBody, color, sticky.id, remoteHash, rec?.autoName);
         }
         new Notice(
-            "A sticky changed in both Obsidian and Plane. Kept both versions; the older one is marked “conflict”.",
+            `A sticky changed in both Obsidian and Plane. The newer version won; the other is saved in ${this.conflictsFolder}.`,
         );
     }
 
@@ -528,7 +610,7 @@ export class StickySync extends Events
 
     onModify(file: TFile)
     {
-        if (this.isStickyFile(file) && this.settings.autoPush)
+        if (this.isCandidate(file) && this.settings.autoPush)
         {
             this.schedule(file);
         }
@@ -549,7 +631,7 @@ export class StickySync extends Events
     onRename(file: TFile, oldPath: string)
     {
         const found = this.recordFor(oldPath);
-        const nowInside = this.isStickyFile(file);
+        const nowInside = this.isCandidate(file);
         if (found)
         {
             if (nowInside)
@@ -605,5 +687,116 @@ export class StickySync extends Events
                 new Notice(`Couldn't delete the sticky in Plane: ${errorMessage(e)}`, 8000);
             }
         }
+    }
+
+    // ---------- clean-up ----------
+
+    /**
+     * Finds stickies that look like copies made by a sync loop: conflict copies, index notes
+     * from other plugins, and exact duplicates (the oldest copy is kept).
+     */
+    async findJunk(): Promise<CleanupPlan>
+    {
+        const looksLikeJunk = (md: string) =>
+            /\(conflict \d{4}-\d{2}-\d{2}/.test(md) || /zoottelkeeper/i.test(md) || /^-{3}/.test(md.trim());
+
+        const remote = await this.plugin.client.listStickies();
+        const junk = new Map<string, PlaneSticky>();
+        const kept = new Map<string, PlaneSticky>(); // body -> oldest sticky with that body
+        const oldestFirst = [...remote].sort((a, b) =>
+            (Date.parse(a.created_at ?? "") || 0) - (Date.parse(b.created_at ?? "") || 0)
+        );
+        for (const sticky of oldestFirst)
+        {
+            const md = planeHtmlToMarkdown(sticky.description_html);
+            if (looksLikeJunk(md))
+            {
+                junk.set(sticky.id, sticky);
+                continue;
+            }
+            const key = normalizeMarkdown(md);
+            if (!key)
+            {
+                continue; // leave empty stickies alone
+            }
+            if (kept.has(key))
+            {
+                junk.set(sticky.id, sticky);
+            }
+            else
+            {
+                kept.set(key, sticky);
+            }
+        }
+
+        const keptIds = new Set([...kept.values()].map((k) => k.id));
+        const notes: TFile[] = [];
+        const seenBodies = new Set<string>();
+        for (const file of this.files())
+        {
+            const local = await this.readLocal(file);
+            if (!local.managed)
+            {
+                continue; // not ours, e.g. the Zoottelkeeper index note itself
+            }
+            const key = normalizeMarkdown(local.body);
+            const isJunk = /\(conflict /.test(file.basename)
+                || (local.id !== undefined && junk.has(local.id))
+                || looksLikeJunk(local.body)
+                || (local.id === undefined || !keptIds.has(local.id)) && seenBodies.has(key);
+            if (isJunk)
+            {
+                notes.push(file);
+            }
+            else
+            {
+                seenBodies.add(key);
+            }
+        }
+        return {
+            remote: [...junk.values()],
+            notes,
+            preview: [...junk.values()].map((j) => stickyTitle(planeHtmlToMarkdown(j.description_html))).slice(0, 8),
+        };
+    }
+
+    async cleanUp(plan: CleanupPlan): Promise<{ deleted: number; trashed: number; failed: number; }>
+    {
+        let deleted = 0;
+        let failed = 0;
+        for (const sticky of plan.remote)
+        {
+            delete this.records()[sticky.id];
+            try
+            {
+                await this.plugin.client.deleteSticky(sticky.id);
+                deleted++;
+            }
+            catch (e)
+            {
+                if (e instanceof PlaneError && e.status === 404)
+                {
+                    deleted++;
+                }
+                else
+                {
+                    failed++;
+                }
+            }
+        }
+        let trashed = 0;
+        for (const file of plan.notes)
+        {
+            const found = this.recordFor(file.path);
+            if (found)
+            {
+                delete this.records()[found[0]];
+            }
+            await this.app.fileManager.trashFile(file);
+            trashed++;
+        }
+        this.plugin.saveSettings();
+        this.changed();
+        return { deleted, trashed, failed };
     }
 }

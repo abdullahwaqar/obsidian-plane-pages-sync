@@ -32,6 +32,11 @@ export class TFile
     {
         return this.path.slice(this.path.lastIndexOf("/") + 1).replace(/\.md$/, "");
     }
+    get parent()
+    {
+        const i = this.path.lastIndexOf("/");
+        return { path: i < 0 ? "" : this.path.slice(0, i) };
+    }
     get extension()
     {
         return "md";

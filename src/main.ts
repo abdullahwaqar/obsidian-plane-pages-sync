@@ -14,8 +14,8 @@ import { markdownToPlaneHtml } from "./convert";
 import { PlaneClient, PlaneError, type PlaneProject } from "./plane";
 import { type FolderLink, loadSettings, PLANE_CLOUD_API, PlaneSettingTab, type Settings } from "./settings";
 import { StickySync } from "./stickies";
-import { STICKY_VIEW, StickyBoardView } from "./stickyView";
-import { hash, isInFolder, withLock } from "./util";
+import { ConfirmCleanup, STICKY_VIEW, StickyBoardView } from "./stickyView";
+import { errorMessage, hash, isInFolder, withLock } from "./util";
 
 const FM_PAGE = "plane_page";
 const FM_PROJECT = "plane_project";
@@ -126,6 +126,45 @@ export default class PlanePagesSync extends Plugin
         const minutes = Math.max(1, this.settings.stickyPullMinutes);
         this.stickyTimer = window.setInterval(() => void this.stickies.pull({ quiet: true }), minutes * 60_000);
         this.registerInterval(this.stickyTimer);
+    }
+
+    async cleanUpStickies()
+    {
+        if (!this.configured)
+        {
+            new Notice("Add your Plane token and workspace in this plugin's settings first.");
+            return;
+        }
+        const notice = new Notice("Looking for duplicate stickies…", 0);
+        try
+        {
+            const plan = await this.stickies.findJunk();
+            notice.hide();
+            if (!plan.remote.length && !plan.notes.length)
+            {
+                new Notice("No duplicate stickies found.");
+                return;
+            }
+            new ConfirmCleanup(this.app, plan, () =>
+            {
+                const progress = new Notice("Cleaning up stickies…", 0);
+                void this.stickies.cleanUp(plan).then(({ deleted, trashed, failed }) =>
+                {
+                    progress.hide();
+                    new Notice(
+                        `Deleted ${deleted} stickies in Plane and moved ${trashed} notes to trash.${
+                            failed ? ` ${failed} couldn't be deleted; run the clean-up again.` : ""
+                        }`,
+                        8000,
+                    );
+                });
+            }).open();
+        }
+        catch (e)
+        {
+            notice.hide();
+            new Notice(`Couldn't check stickies: ${errorMessage(e)}`, 8000);
+        }
     }
 
     async openStickyBoard()
@@ -709,6 +748,11 @@ export default class PlanePagesSync extends Plugin
             id: "open-stickies",
             name: "Open sticky board",
             callback: () => void this.openStickyBoard(),
+        });
+        this.addCommand({
+            id: "clean-up-stickies",
+            name: "Clean up duplicate stickies",
+            callback: () => void this.cleanUpStickies(),
         });
         this.addCommand({ id: "sync-stickies", name: "Sync stickies now", callback: () => void this.stickies.pull() });
         this.addCommand({

@@ -1,5 +1,6 @@
 import { type App, debounce, ItemView, Menu, Modal, Setting, setIcon, TFile, type WorkspaceLeaf } from "obsidian";
 import type PlanePagesSync from "./main";
+import type { CleanupPlan } from "./stickies";
 import { STICKY_COLORS, type StickyColor } from "./stickyConvert";
 
 export const STICKY_VIEW = "plane-stickies";
@@ -55,6 +56,7 @@ export class StickyBoardView extends ItemView
         const actions = header.createDiv({ cls: "pps-actions" });
         this.iconButton(actions, "plus", "New sticky", () => void this.addSticky());
         this.iconButton(actions, "refresh-cw", "Sync with Plane", () => void this.sync.pull());
+        this.iconButton(actions, "eraser", "Clean up duplicate stickies", () => void this.plugin.cleanUpStickies());
 
         this.statusEl = root.createDiv({ cls: "pps-status" });
         this.gridEl = root.createDiv({ cls: "pps-grid" });
@@ -129,10 +131,12 @@ export class StickyBoardView extends ItemView
             this.sync.files().map(async (file) =>
             {
                 const local = await this.sync.readLocal(file);
-                return { file, color: local.color, body: local.body.trim(), mtime: file.stat.mtime };
+                return local.managed
+                    ? { file, color: local.color, body: local.body.trim(), mtime: file.stat.mtime }
+                    : null;
             }),
         );
-        return cards.sort((a, b) => b.mtime - a.mtime);
+        return cards.filter((c): c is Card => c !== null).sort((a, b) => b.mtime - a.mtime);
     }
 
     async render()
@@ -235,6 +239,53 @@ export class StickyBoardView extends ItemView
             el.dataset.path === file.path
         );
         card?.querySelector<HTMLTextAreaElement>(".pps-text")?.focus();
+    }
+}
+
+export class ConfirmCleanup extends Modal
+{
+    constructor(app: App, private plan: CleanupPlan, private onConfirm: () => void)
+    {
+        super(app);
+    }
+
+    onOpen()
+    {
+        const { remote, notes, preview } = this.plan;
+        this.setTitle("Clean up duplicate stickies?");
+        this.contentEl.createEl("p", {
+            text: `This deletes ${remote.length} sticky${
+                remote.length === 1 ? "" : "s"
+            } in Plane and moves ${notes.length} note${
+                notes.length === 1 ? "" : "s"
+            } to your trash. They look like copies or conflict leftovers; one copy of each real sticky is kept.`,
+        });
+        if (preview.length)
+        {
+            const list = this.contentEl.createEl("ul");
+            for (const title of preview)
+            {
+                list.createEl("li", { text: title });
+            }
+            if (remote.length > preview.length)
+            {
+                this.contentEl.createEl("p", { text: `…and ${remote.length - preview.length} more.` });
+            }
+        }
+        new Setting(this.contentEl)
+            .addButton((b) => b.setButtonText("Cancel").onClick(() => this.close()))
+            .addButton((b) =>
+                b.setButtonText("Clean up").setDestructive().onClick(() =>
+                {
+                    this.onConfirm();
+                    this.close();
+                })
+            );
+    }
+
+    onClose()
+    {
+        this.contentEl.empty();
     }
 }
 
