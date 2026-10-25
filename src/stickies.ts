@@ -1,3 +1,15 @@
+// Two-way sync between a folder of notes and your Plane stickies.
+//
+// Each sticky is one note with `plane_sticky` (its id) and `plane_color` in the properties.
+// For every sticky we remember the content hash on both sides at the last sync. On each pull:
+//   - only Plane changed    -> rewrite the note
+//   - only the note changed -> push it
+//   - both changed          -> the newer version wins; the other is saved in Conflicts/ as a plain
+//                              note that is never synced, so conflicts can't multiply.
+//
+// Only notes directly in the folder that carry `plane_sticky` or `plane_color` are stickies.
+// Anything else (index notes from other plugins, conflict copies, your own notes) is ignored.
+// If a sync run goes wrong (several conflicts, or many new stickies at once) sync pauses itself.
 import { Events, getFrontMatterInfo, Notice, normalizePath, parseYaml, type TFile } from "obsidian";
 import type PlanePagesSync from "./main";
 import { PlaneError, type PlaneSticky } from "./plane";
@@ -141,6 +153,8 @@ export class StickySync extends Events
         this.trigger("changed");
     }
 
+    // ---------- reading and writing notes ----------
+
     async readLocal(file: TFile): Promise<LocalSticky>
     {
         const content = await this.app.vault.read(file);
@@ -251,6 +265,8 @@ export class StickySync extends Events
     {
         return Object.entries(this.records()).find(([, r]) => r.path === path);
     }
+
+    // ---------- push (note -> Plane) ----------
 
     schedule(file: TFile, delayMs = 2000)
     {
@@ -385,6 +401,8 @@ export class StickySync extends Events
         rec.path = path;
         await this.app.fileManager.renameFile(file, path);
     }
+
+    // ---------- pull (Plane -> notes) ----------
 
     pull(opts: { quiet?: boolean; } = {}): Promise<void>
     {
@@ -588,6 +606,8 @@ export class StickySync extends Events
         this.records()[id] = { path: file.path, localHash: local.hash, remoteHash, autoName };
     }
 
+    // ---------- vault events ----------
+
     onModify(file: TFile)
     {
         if (this.isCandidate(file) && this.settings.autoPush)
@@ -668,6 +688,8 @@ export class StickySync extends Events
             }
         }
     }
+
+    // ---------- clean-up ----------
 
     /**
      * Finds stickies that look like copies made by a sync loop: conflict copies, index notes
