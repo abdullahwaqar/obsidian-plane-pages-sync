@@ -17,14 +17,6 @@ Requires Obsidian 1.13.2 or later. Works on desktop and mobile.
 
 ## Install
 
-### With BRAT (recommended until the plugin is in the community directory)
-
-1. Install **BRAT** from Settings > Community plugins > Browse, and enable it.
-2. Run the command **BRAT: Add a beta plugin for testing**.
-3. Paste `https://github.com/abdullahwaqar/obsidian-plane-sync` and confirm.
-
-BRAT installs the latest release and keeps it updated.
-
 ### Manually
 
 1. Download `main.js`, `manifest.json` and `styles.css` from the [latest release](https://github.com/abdullahwaqar/obsidian-plane-sync/releases/latest).
@@ -74,16 +66,16 @@ Your Plane stickies and a folder of notes stay in sync, both ways.
 
 ## What converts
 
-| Obsidian | Plane |
-|---|---|
-| Headings, bold, italic, strikethrough, code, code blocks, quotes, tables, `---` | Native equivalents |
-| `- [ ]` and `- [x]` | Plane checklist |
-| `> [!warning] Title` callouts | Plane callout block with a matching emoji and colour |
-| `[[Other note]]` | Link to that note's Plane page once it's synced, otherwise plain text |
-| `==highlight==` | Bold |
-| `%% comments %%` and frontmatter | Dropped |
-| Raw HTML | Shown as text, never injected |
-| `![[image.png]]` (local files) | Placeholder text, see limitations |
+| Obsidian                                                                        | Plane                                                                 |
+| ------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
+| Headings, bold, italic, strikethrough, code, code blocks, quotes, tables, `---` | Native equivalents                                                    |
+| `- [ ]` and `- [x]`                                                             | Plane checklist                                                       |
+| `> [!warning] Title` callouts                                                   | Plane callout block with a matching emoji and colour                  |
+| `[[Other note]]`                                                                | Link to that note's Plane page once it's synced, otherwise plain text |
+| `==highlight==`                                                                 | Bold                                                                  |
+| `%% comments %%` and frontmatter                                                | Dropped                                                               |
+| Raw HTML                                                                        | Shown as text, never injected                                         |
+| `![[image.png]]` (local files)                                                  | Placeholder text, see limitations                                     |
 
 ## Limitations
 
@@ -110,38 +102,3 @@ npm run format        # dprint: 4 spaces, braces on the next line
 ```
 
 To try changes in a vault, link the project folder into `<vault>/.obsidian/plugins/plane-sync` and install the Hot Reload plugin.
-
-Tooling:
-
-- **dprint** formats the code. Biome's formatter can't put braces on the next line, so it's turned off.
-- **Biome** lints and sorts imports.
-- **ESLint** runs only `eslint-plugin-obsidianmd`, the same rules the community directory uses to review plugins.
-
-The plugin id is `plane-sync` (no "obsidian") because Obsidian rejects ids and names containing "obsidian".
-
-## Releasing
-
-```bash
-npm version patch     # or minor / major. Updates manifest.json and versions.json, commits and tags
-git push --follow-tags
-```
-
-Pushing the tag runs `.github/workflows/release.yml`. It checks that the tag matches `manifest.json`, runs every check, builds, attests the build and publishes a GitHub release with `main.js` and `manifest.json`. BRAT users get the update automatically.
-
-Tags have no `v` prefix (`0.2.0`, not `v0.2.0`). `.npmrc` sets this for `npm version`.
-
-### Publishing to the community directory
-
-Only the first version needs submitting. Later releases are picked up from GitHub automatically.
-
-1. Make the repository public with this README, `LICENSE` and `manifest.json` committed on the default branch.
-2. Publish a release with the steps above.
-3. Sign in at [community.obsidian.md](https://community.obsidian.md) with your Obsidian account and connect GitHub.
-4. Add the plugin from the dashboard and set pricing to **Free**.
-5. Fix anything the automated review flags, then release a new patch version.
-
-Run `npm run check` before every release. It covers the same lint rules as the review.
-
-## License
-
-[MIT](LICENSE)
