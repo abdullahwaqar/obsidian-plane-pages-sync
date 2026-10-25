@@ -13,6 +13,9 @@ import {
 import { markdownToPlaneHtml } from "./convert";
 import { PlaneClient, PlaneError, type PlaneProject } from "./plane";
 import { type FolderLink, loadSettings, PLANE_CLOUD_API, PlaneSettingTab, type Settings } from "./settings";
+import { StickySync } from "./stickies";
+import { STICKY_VIEW, StickyBoardView } from "./stickyView";
+import { hash, isInFolder, withLock } from "./util";
 
 const FM_PAGE = "plane_page";
 const FM_PROJECT = "plane_project";
@@ -31,6 +34,9 @@ export default class PlanePagesSync extends Plugin
 {
     settings!: Settings;
     client!: PlaneClient;
+    stickies!: StickySync;
+    private stickyTimer: number | null = null;
+    private lastFocusPull = 0;
     private projects: PlaneProject[] | null = null;
     private timers = new Map<string, number>();
     private inFlight = 0;
@@ -46,6 +52,9 @@ export default class PlanePagesSync extends Plugin
             apiKey: this.token(),
             workspace: this.settings.workspace,
         }));
+
+        this.stickies = new StickySync(this);
+        this.registerView(STICKY_VIEW, (leaf) => new StickyBoardView(leaf, this));
 
         this.statusEl = this.addStatusBarItem();
         this.statusEl.addClass("mod-clickable");
@@ -63,6 +72,7 @@ export default class PlanePagesSync extends Plugin
         this.renderStatus();
 
         this.addRibbonIcon("upload-cloud", "Push notes to Plane", () => void this.pushAll());
+        this.addRibbonIcon("sticky-note", "Open Plane stickies", () => void this.openStickyBoard());
         this.addSettingTab(new PlaneSettingTab(this.app, this));
         this.registerCommands();
         this.registerMenus();
@@ -72,16 +82,68 @@ export default class PlanePagesSync extends Plugin
             this.registerEvent(this.app.vault.on("modify", (f) => this.onModify(f)));
             this.registerEvent(this.app.vault.on("rename", (f, old) => this.onRename(f, old)));
             this.registerEvent(this.app.vault.on("delete", (f) => void this.onDelete(f)));
+            this.registerEvent(this.app.vault.on("create", (f) =>
+            {
+                if (f instanceof TFile)
+                {
+                    this.stickies.onCreate(f);
+                }
+            }));
+
+            // Stickies: pull on start, on a timer, and when you come back to Obsidian (e.g. after editing in Plane).
+            this.restartStickyTimer();
+            void this.stickies.pull({ quiet: true });
+            this.registerDomEvent(window, "focus", () =>
+            {
+                if (Date.now() - this.lastFocusPull > 30_000)
+                {
+                    this.lastFocusPull = Date.now();
+                    void this.stickies.pull({ quiet: true });
+                }
+            });
         });
     }
 
     onunload()
     {
+        this.stickies?.destroy();
+        if (this.stickyTimer !== null)
+        {
+            window.clearInterval(this.stickyTimer);
+        }
         for (const t of this.timers.values())
         {
             window.clearTimeout(t);
         }
     }
+
+    restartStickyTimer()
+    {
+        if (this.stickyTimer !== null)
+        {
+            window.clearInterval(this.stickyTimer);
+        }
+        const minutes = Math.max(1, this.settings.stickyPullMinutes);
+        this.stickyTimer = window.setInterval(() => void this.stickies.pull({ quiet: true }), minutes * 60_000);
+        this.registerInterval(this.stickyTimer);
+    }
+
+    async openStickyBoard()
+    {
+        const existing = this.app.workspace.getLeavesOfType(STICKY_VIEW)[0];
+        const leaf = existing ?? this.app.workspace.getRightLeaf(false);
+        if (!leaf)
+        {
+            return;
+        }
+        if (!existing)
+        {
+            await leaf.setViewState({ type: STICKY_VIEW, active: true });
+        }
+        await this.app.workspace.revealLeaf(leaf);
+    }
+
+    // ---------- settings ----------
 
     async loadSettings()
     {
@@ -135,6 +197,8 @@ export default class PlanePagesSync extends Plugin
         return `${this.appBase()}/${this.settings.workspace}/projects/${projectId}/pages/${pageId}`;
     }
 
+    // ---------- status bar ----------
+
     private renderStatus()
     {
         const pending = this.timers.size + this.inFlight;
@@ -159,6 +223,8 @@ export default class PlanePagesSync extends Plugin
         this.statusEl.setAttr("aria-label", this.lastError || "Click to push all linked folders");
     }
 
+    // ---------- folder <-> project mapping ----------
+
     async getProjects(refresh = false): Promise<PlaneProject[]>
     {
         if (!this.projects || refresh)
@@ -171,6 +237,10 @@ export default class PlanePagesSync extends Plugin
     /** Nearest linked ancestor folder, or auto-link a folder under the root that matches a project name. */
     async projectFor(file: TFile): Promise<FolderLink | null>
     {
+        if (this.stickies.isStickyFile(file))
+        {
+            return null;
+        }
         for (let f: TFolder | null = file.parent; f && !f.isRoot(); f = f.parent)
         {
             const link = this.settings.links[f.path];
@@ -210,6 +280,15 @@ export default class PlanePagesSync extends Plugin
 
     linkFolder(folder: TFolder, project: PlaneProject)
     {
+        const stickies = this.stickies.folder;
+        if (
+            stickies
+            && (folder.path === stickies || isInFolder(folder.path, stickies) || isInFolder(stickies, folder.path))
+        )
+        {
+            new Notice("That folder holds your stickies, so it can't be linked to a project as well.");
+            return;
+        }
         // Drop links on descendants so the new link wins for the whole subtree.
         for (const p of Object.keys(this.settings.links))
         {
@@ -230,19 +309,7 @@ export default class PlanePagesSync extends Plugin
         new Notice(`"${folder.path}" is no longer linked to Plane`);
     }
 
-    private hash(s: string)
-    {
-        let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
-        for (let i = 0; i < s.length; i++)
-        {
-            const c = s.charCodeAt(i);
-            h1 = Math.imul(h1 ^ c, 2654435761);
-            h2 = Math.imul(h2 ^ c, 1597334677);
-        }
-        h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
-        h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
-        return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36);
-    }
+    // ---------- push ----------
 
     private toHtml(file: TFile, content: string)
     {
@@ -270,7 +337,13 @@ export default class PlanePagesSync extends Plugin
         return { html, pendingLink };
     }
 
-    async pushFile(file: TFile, opts: { force?: boolean; quiet?: boolean; } = {}): Promise<PushResult>
+    pushFile(file: TFile, opts: { force?: boolean; quiet?: boolean; } = {}): Promise<PushResult>
+    {
+        // One push per note at a time, so a new note can't be created in Plane twice.
+        return withLock(`page:${file.path}`, () => this.pushFileNow(file, opts));
+    }
+
+    private async pushFileNow(file: TFile, opts: { force?: boolean; quiet?: boolean; }): Promise<PushResult>
     {
         if (file.extension !== "md" || !this.configured)
         {
@@ -305,7 +378,7 @@ export default class PlanePagesSync extends Plugin
                 this.needsSecondPass.add(file.path);
             }
             const name = file.basename;
-            const hash = this.hash(`${name}\n${html}`);
+            const contentHash = hash(`${name}\n${html}`);
 
             let pageId = fm.pageId;
             const pageProject = fm.projectId;
@@ -318,7 +391,7 @@ export default class PlanePagesSync extends Plugin
                 pageId = undefined;
             }
 
-            if (pageId && !opts.force && rec?.pageId === pageId && rec.hash === hash)
+            if (pageId && !opts.force && rec?.pageId === pageId && rec.hash === contentHash)
             {
                 return "unchanged";
             }
@@ -372,7 +445,7 @@ export default class PlanePagesSync extends Plugin
                 });
             }
 
-            this.settings.pages[file.path] = { pageId: pageId, projectId: link.projectId, hash };
+            this.settings.pages[file.path] = { pageId: pageId, projectId: link.projectId, hash: contentHash };
             this.saveSettings();
             this.lastError = "";
             return result;
@@ -399,7 +472,8 @@ export default class PlanePagesSync extends Plugin
         const root = normalizePath(this.settings.rootFolder || "");
         const linked = Object.keys(this.settings.links);
         return this.app.vault.getMarkdownFiles().filter((f) =>
-            linked.some((p) => f.path.startsWith(`${p}/`)) || (root && f.path.startsWith(`${root}/`))
+            !this.stickies.isStickyFile(f)
+            && (linked.some((p) => f.path.startsWith(`${p}/`)) || (root && f.path.startsWith(`${root}/`)))
         );
     }
 
@@ -444,8 +518,14 @@ export default class PlanePagesSync extends Plugin
         return this.pushMany(files, `"${folder.name}"`);
     }
 
+    // ---------- vault events ----------
+
     private isTracked(file: TFile)
     {
+        if (this.stickies.isStickyFile(file))
+        {
+            return false;
+        }
         if (this.settings.pages[file.path])
         {
             return true;
@@ -481,6 +561,11 @@ export default class PlanePagesSync extends Plugin
 
     private onModify(f: TAbstractFile)
     {
+        if (f instanceof TFile && this.stickies.isStickyFile(f))
+        {
+            this.stickies.onModify(f);
+            return;
+        }
         if (!this.settings.autoPush || !this.configured)
         {
             return;
@@ -512,11 +597,29 @@ export default class PlanePagesSync extends Plugin
                     delete this.settings.pages[key];
                 }
             }
+            // The stickies folder (or a parent of it) was renamed: follow it.
+            const stickies = this.stickies.folder;
+            if (stickies === oldPath || isInFolder(stickies, oldPath))
+            {
+                this.settings.stickiesFolder = f.path + stickies.slice(oldPath.length);
+            }
+            for (const rec of Object.values(this.settings.stickies))
+            {
+                if (isInFolder(rec.path, oldPath))
+                {
+                    rec.path = f.path + rec.path.slice(oldPath.length);
+                }
+            }
             this.saveSettings();
             return;
         }
         if (!(f instanceof TFile))
         {
+            return;
+        }
+        if (this.stickies.isStickyFile(f) || isInFolder(oldPath, this.stickies.folder))
+        {
+            this.stickies.onRename(f, oldPath);
             return;
         }
         const rec = this.settings.pages[oldPath];
@@ -534,23 +637,43 @@ export default class PlanePagesSync extends Plugin
 
     private async onDelete(f: TAbstractFile)
     {
-        if (!(f instanceof TFile))
+        // A deleted folder takes all its notes with it, so handle every record inside it.
+        const paths = f instanceof TFolder
+            ? [
+                ...Object.keys(this.settings.pages).filter((p) => isInFolder(p, f.path)),
+                ...Object.values(this.settings.stickies).map((r) => r.path).filter((p) => isInFolder(p, f.path)),
+            ]
+            : f instanceof TFile
+            ? [f.path]
+            : [];
+        for (const path of paths)
         {
-            return;
+            if (isInFolder(path, this.stickies.folder))
+            {
+                this.stickies.onDelete(path);
+            }
+            else
+            {
+                await this.archiveDeleted(path);
+            }
         }
-        const rec = this.settings.pages[f.path];
+    }
+
+    private async archiveDeleted(path: string)
+    {
+        const rec = this.settings.pages[path];
         if (!rec)
         {
             return;
         }
-        delete this.settings.pages[f.path];
+        delete this.settings.pages[path];
         this.saveSettings();
         if (this.settings.onDelete === "archive" && this.configured)
         {
             try
             {
                 await this.client.archivePage(rec.projectId, rec.pageId);
-                new Notice(`Archived "${f.basename}" in Plane`);
+                new Notice(`Archived "${path.slice(path.lastIndexOf("/") + 1, -3)}" in Plane`);
             }
             catch (e)
             {
@@ -558,6 +681,8 @@ export default class PlanePagesSync extends Plugin
             }
         }
     }
+
+    // ---------- commands & menus ----------
 
     private registerCommands()
     {
@@ -578,6 +703,22 @@ export default class PlanePagesSync extends Plugin
                     );
                 }
                 return true;
+            },
+        });
+        this.addCommand({
+            id: "open-stickies",
+            name: "Open sticky board",
+            callback: () => void this.openStickyBoard(),
+        });
+        this.addCommand({ id: "sync-stickies", name: "Sync stickies now", callback: () => void this.stickies.pull() });
+        this.addCommand({
+            id: "new-sticky",
+            name: "New sticky",
+            callback: async () =>
+            {
+                await this.openStickyBoard();
+                const file = await this.stickies.newSticky();
+                await this.app.workspace.getLeaf("tab").openFile(file);
             },
         });
         this.addCommand({ id: "push-all", name: "Push all linked folders", callback: () => void this.pushAll() });

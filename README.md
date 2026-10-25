@@ -13,6 +13,18 @@ Plane/
     Retention rules.md
 ```
 
+## Stickies
+
+Your Plane stickies and a folder of notes stay in sync, both ways.
+
+- Open the board with the sticky note icon in the left ribbon, or the command **Open sticky board**. It shows every sticky as a coloured card you can type in, recolour and delete.
+- Each sticky is also a normal note in `Plane/Stickies` (you can change the folder in settings). New notes you put there become new stickies.
+- Edits in Obsidian reach Plane a couple of seconds after you stop typing. Edits made in Plane arrive every 2 minutes, whenever you switch back to Obsidian, or straight away with **Sync stickies now**.
+- Colours match Plane's eight sticky colours.
+- Deleting a sticky on either side deletes it on the other. Moving a note out of the stickies folder also removes it from Plane.
+- If the same sticky was changed in both places since the last sync, nothing is lost: the newer version stays, and the other is saved as a separate sticky marked "conflict".
+- Plane only shows each person their own stickies, so you'll see the stickies of the account your token belongs to.
+
 Requires Obsidian 1.13.2 or later. Works on desktop and mobile.
 
 ## Install

@@ -24,7 +24,8 @@
         "node_modules",
         "package-lock.json",
         "main.js",
-        ".github"
+        ".github",
+        ".test-build"
     ],
     "plugins": [
         "./node_modules/@dprint/typescript/plugin.wasm",

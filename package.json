@@ -13,7 +13,7 @@
     "scripts": {
         "dev": "node esbuild.config.mjs",
         "build": "tsc && node esbuild.config.mjs production",
-        "test": "node --experimental-strip-types --test test/*.test.ts",
+        "test": "node --experimental-strip-types --test test/*.test.ts && node scripts/test-sync.mjs",
         "lint": "biome check . && eslint .",
         "lint:fix": "biome check --write . && eslint --fix .",
         "format": "dprint fmt",
@@ -26,7 +26,9 @@
         "pre-commit": "npx dprint fmt --staged && git add -u"
     },
     "dependencies": {
-        "marked": "^18.1.1"
+        "marked": "^18.1.1",
+        "turndown": "^7.2.4",
+        "turndown-plugin-gfm": "^1.0.2"
     },
     "devDependencies": {
         "@biomejs/biome": "^2.6.3",
@@ -35,6 +37,7 @@
         "@eslint/js": "^9.39.5",
         "@eslint/json": "^0.14.0",
         "@types/node": "^26.6.5",
+        "@types/turndown": "^5.0.6",
         "dprint": "^0.64.3",
         "esbuild": "^0.28.2",
         "eslint": "^9.39.5",

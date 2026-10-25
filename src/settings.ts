@@ -14,6 +14,14 @@ export interface PageRecord
     hash: string;
 }
 
+export interface StickyRecord
+{
+    path: string;
+    localHash: string; // note content at the last sync
+    remoteHash: string; // Plane content at the last sync
+    autoName?: string; // file name we generated; renamed with the first line until the user renames it
+}
+
 export interface Settings
 {
     tokenSecret: string; // name of the secret in Obsidian's secret storage, never the token itself
@@ -26,6 +34,10 @@ export interface Settings
     onDelete: "archive" | "keep";
     links: Record<string, FolderLink>; // folder path -> project
     pages: Record<string, PageRecord>; // file path -> last pushed state
+    stickiesEnabled: boolean;
+    stickiesFolder: string;
+    stickyPullMinutes: number;
+    stickies: Record<string, StickyRecord>; // sticky id -> sync state
 }
 
 export const PLANE_CLOUD_API = "https://api.plane.so";
@@ -43,6 +55,10 @@ export const DEFAULTS: Settings = {
     onDelete: "archive",
     links: {},
     pages: {},
+    stickiesEnabled: true,
+    stickiesFolder: "Plane/Stickies",
+    stickyPullMinutes: 2,
+    stickies: {},
 };
 
 interface LegacySettings
@@ -57,7 +73,13 @@ export function loadSettings(app: App, raw: unknown): { settings: Settings; migr
 {
     const stored = (raw ?? {}) as Partial<Settings> & LegacySettings;
     const { apiKey, apiBase, appBase: _appBase, ...rest } = stored;
-    const settings: Settings = { ...DEFAULTS, ...rest, links: { ...rest.links }, pages: { ...rest.pages } };
+    const settings: Settings = {
+        ...DEFAULTS,
+        ...rest,
+        links: { ...rest.links },
+        pages: { ...rest.pages },
+        stickies: { ...rest.stickies },
+    };
     let migrated = false;
 
     // 0.1.x kept the token in data.json. Move it into secret storage.
@@ -132,7 +154,19 @@ export class PlaneSettingTab extends PluginSettingTab
             this.connectionStatus = "";
             this.plugin.resetConnection();
         }
+        if (key === "stickiesFolder" && typeof value === "string")
+        {
+            s[key] = value.trim().replace(/\/+$/, "");
+        }
         await this.plugin.saveData(this.plugin.settings);
+        if (key === "stickyPullMinutes")
+        {
+            this.plugin.restartStickyTimer();
+        }
+        if ((key === "stickiesEnabled" && value === true) || key === "stickiesFolder")
+        {
+            void this.plugin.stickies.pull({ quiet: true });
+        }
         if (CONNECTION_KEYS.has(key))
         {
             this.update();
@@ -283,6 +317,58 @@ export class PlaneSettingTab extends PluginSettingTab
                                         button.setDisabled(true);
                                         void this.plugin.pushAll().finally(() => this.update());
                                     })
+                            );
+                        },
+                    },
+                ],
+            },
+            {
+                type: "group",
+                heading: "Stickies",
+                items: [
+                    {
+                        name: "Sync stickies",
+                        desc:
+                            "Keep your Plane stickies and a folder of notes in sync, both ways. Plane only shows each person their own stickies.",
+                        aliases: ["sticky notes"],
+                        control: { type: "toggle", key: "stickiesEnabled" },
+                    },
+                    {
+                        name: "Stickies folder",
+                        desc: "Each sticky is a note in this folder. New notes here become new stickies.",
+                        control: {
+                            disabled: () => !s.stickiesEnabled,
+                            type: "folder",
+                            key: "stickiesFolder",
+                            placeholder: "Plane/Stickies",
+                            validate: (v) => v.trim() ? undefined : "Choose a folder for your stickies.",
+                        },
+                    },
+                    {
+                        name: "Check Plane for changes",
+                        desc:
+                            "How often to fetch stickies edited in Plane. Obsidian also checks when you switch back to it.",
+                        aliases: ["interval", "pull"],
+                        control: {
+                            type: "slider",
+                            key: "stickyPullMinutes",
+                            min: 1,
+                            max: 30,
+                            step: 1,
+                            displayFormat: (v: number) => (v === 1 ? "every minute" : `every ${v} min`),
+                            disabled: () => !s.stickiesEnabled,
+                        },
+                    },
+                    {
+                        name: "Sticky board",
+                        desc: "A panel of your stickies you can write in, recolour and delete.",
+                        render: (setting) =>
+                        {
+                            setting.addButton((button) =>
+                                button
+                                    .setButtonText("Open board")
+                                    .setDisabled(!s.stickiesEnabled)
+                                    .onClick(() => void this.plugin.openStickyBoard())
                             );
                         },
                     },

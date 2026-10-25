@@ -7,6 +7,26 @@ export interface PlaneProject
     identifier: string;
 }
 
+export interface PlaneSticky
+{
+    id: string;
+    name?: string | null;
+    description_html?: string | null;
+    background_color?: string | null;
+    sort_order?: number | null;
+    created_at?: string;
+    updated_at?: string;
+}
+
+export interface StickyInput
+{
+    description_html?: string;
+    description_stripped?: string;
+    background_color?: string;
+}
+
+type Paginated<T> = { results?: T[]; next_page_results?: boolean; next_cursor?: string; } | T[];
+
 export interface PlanePage
 {
     id: string;
@@ -99,17 +119,17 @@ export class PlaneClient
         return p;
     }
 
-    async listProjects(): Promise<PlaneProject[]>
+    /** Follows Plane's cursor pagination until every result is loaded. */
+    private async listAll<T>(path: string): Promise<T[]>
     {
-        const out: PlaneProject[] = [];
+        const out: T[] = [];
         let cursor = "";
-        for (let i = 0; i < 20; i++)
+        const sep = path.includes("?") ? "&" : "?";
+        for (let i = 0; i < 50; i++)
         {
-            const res = await this.request<
-                { results?: PlaneProject[]; next_page_results?: boolean; next_cursor?: string; } | PlaneProject[]
-            >(
+            const res = await this.request<Paginated<T>>(
                 "GET",
-                `/projects/?per_page=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`,
+                `${path}${sep}per_page=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`,
             );
             if (Array.isArray(res))
             {
@@ -123,6 +143,33 @@ export class PlaneClient
             cursor = res.next_cursor;
         }
         return out;
+    }
+
+    listProjects(): Promise<PlaneProject[]>
+    {
+        return this.listAll<PlaneProject>("/projects/");
+    }
+
+    // Stickies belong to the token's owner, so these only ever see your own stickies.
+
+    listStickies(): Promise<PlaneSticky[]>
+    {
+        return this.listAll<PlaneSticky>("/stickies/");
+    }
+
+    createSticky(input: StickyInput)
+    {
+        return this.request<PlaneSticky>("POST", "/stickies/", input);
+    }
+
+    updateSticky(id: string, input: StickyInput)
+    {
+        return this.request<PlaneSticky>("PATCH", `/stickies/${id}/`, input);
+    }
+
+    deleteSticky(id: string)
+    {
+        return this.request<void>("DELETE", `/stickies/${id}/`);
     }
 
     createPage(projectId: string, name: string, html: string, externalId: string)

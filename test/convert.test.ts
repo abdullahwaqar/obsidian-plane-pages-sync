@@ -79,3 +79,11 @@ test("empty note produces an empty paragraph", () =>
 {
     assert.equal(convert("---\na: 1\n---\n"), "<p></p>");
 });
+
+test("checklist and normal items in one list stay separate", () =>
+{
+    const html = convert("- [x] done\n\n- plain");
+    assert.ok(html.includes('<ul data-type="taskList"><li data-checked="true">'));
+    assert.ok(html.includes("<ul><li>"));
+    assert.ok(!html.includes('data-checked="false"'));
+});

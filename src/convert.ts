@@ -1,3 +1,6 @@
+// Markdown (Obsidian flavour) -> HTML that Plane's page editor accepts.
+// Pure module: no Obsidian imports, so it can be tested in plain Node.
+
 import type { Tokens } from "marked";
 import { Marked } from "marked";
 
@@ -119,27 +122,46 @@ function buildMarked(): Marked
             },
             list(token: Tokens.List)
             {
-                const isTask = token.items.some((i) => i.task);
-                const items = token.items
-                    .map((item) =>
+                const renderItem = (item: Tokens.ListItem) =>
+                {
+                    const inner = this.parser.parse(item.tokens.filter((t) => t.type !== "checkbox"));
+                    const body = item.loose ? inner : `<p>${inner}</p>`;
+                    return item.task
+                        ? `<li data-checked="${item.checked ? "true" : "false"}">${body}</li>`
+                        : `<li>${body}</li>`;
+                };
+                // Plane can't mix checklist and normal items in one list, so split into runs.
+                const runs: Tokens.ListItem[][] = [];
+                for (const item of token.items)
+                {
+                    const last = runs[runs.length - 1];
+                    if (last && !!last[0].task === !!item.task)
                     {
-                        const inner = this.parser.parse(item.tokens.filter((t) => t.type !== "checkbox"));
-                        const body = item.loose ? inner : `<p>${inner}</p>`;
-                        return isTask
-                            ? `<li data-checked="${item.checked ? "true" : "false"}">${body}</li>`
-                            : `<li>${body}</li>`;
+                        last.push(item);
+                    }
+                    else
+                    {
+                        runs.push([item]);
+                    }
+                }
+                let next = typeof token.start === "number" ? token.start : 1;
+                return runs
+                    .map((run) =>
+                    {
+                        const items = run.map(renderItem).join("");
+                        if (run[0].task)
+                        {
+                            return `<ul data-type="taskList">${items}</ul>`;
+                        }
+                        if (token.ordered)
+                        {
+                            const start = next !== 1 ? ` start="${next}"` : "";
+                            next += run.length;
+                            return `<ol${start}>${items}</ol>`;
+                        }
+                        return `<ul>${items}</ul>`;
                     })
                     .join("");
-                if (isTask)
-                {
-                    return `<ul data-type="taskList">${items}</ul>`;
-                }
-                if (token.ordered)
-                {
-                    const start = typeof token.start === "number" && token.start !== 1 ? ` start="${token.start}"` : "";
-                    return `<ol${start}>${items}</ol>`;
-                }
-                return `<ul>${items}</ul>`;
             },
             blockquote(token: Tokens.Blockquote)
             {

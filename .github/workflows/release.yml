@@ -1,5 +1,6 @@
 name: Release
 
+# Push a tag that matches manifest.json's version (e.g. 0.2.0, no "v") to publish.
 on:
     push:
         tags: ["*.*.*"]
@@ -37,11 +38,12 @@ jobs:
                   subject-path: |
                       main.js
                       manifest.json
+                      styles.css
 
             - name: Create GitHub release
               env:
                   GH_TOKEN: ${{ github.token }}
               run: |
-                  gh release create "${GITHUB_REF_NAME}" main.js manifest.json \
+                  gh release create "${GITHUB_REF_NAME}" main.js manifest.json styles.css \
                       --title "${GITHUB_REF_NAME}" \
                       --generate-notes
