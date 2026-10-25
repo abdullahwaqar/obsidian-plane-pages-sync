@@ -1,5 +1,3 @@
-// Sticky content conversion. Plane stores sticky bodies as HTML, Obsidian notes are Markdown.
-// Pure module: no Obsidian imports, so it can be tested in plain Node.
 import TurndownService from "turndown";
 import { strikethrough, tables } from "turndown-plugin-gfm";
 import { markdownToPlaneHtml } from "./convert.ts";
