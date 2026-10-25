@@ -2,6 +2,8 @@
 
 Write notes in Obsidian, publish them as [Plane](https://plane.so) project pages. One folder is one Plane project, and every note in it becomes a page.
 
+![Plane Pages Sync: write in Obsidian, publish to Plane](assets/how-it-works.png)
+
 ```
 Plane/
   Clearline Books/        -> Plane project "Clearline Books"
